@@ -1,14 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include "alloc-util.h"
-#include "env-util.h"
 #include "hashmap.h"
 #include "log.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tests.h"
 #include "util.h"
-
-static bool arg_slow = false;
 
 void test_hashmap_funcs(void);
 
@@ -739,15 +737,16 @@ static void test_hashmap_many(void) {
         Hashmap *h;
         unsigned i, j;
         void *v, *k;
+        bool slow = slow_tests_enabled();
         const struct {
                 const struct hash_ops *ops;
                 unsigned n_entries;
         } tests[] = {
-                { .ops = NULL,                  .n_entries = arg_slow ? 1 << 20 : 240 },
-                { .ops = &crippled_hashmap_ops, .n_entries = arg_slow ? 1 << 14 : 140 },
+                { .ops = NULL,                  .n_entries = slow ? 1 << 20 : 240 },
+                { .ops = &crippled_hashmap_ops, .n_entries = slow ? 1 << 14 : 140 },
         };
 
-        log_info("%s (%s)", __func__, arg_slow ? "slow" : "fast");
+        log_info("%s (%s)", __func__, slow ? "slow" : "fast");
 
         for (j = 0; j < ELEMENTSOF(tests); j++) {
                 assert_se(h = hashmap_new(tests[j].ops));
@@ -864,6 +863,43 @@ static void test_hashmap_clear_free_free(void) {
 
         hashmap_clear_free_free(m);
         assert_se(hashmap_isempty(m));
+
+        assert_se(hashmap_put(m, strdup("key 1"), strdup("value 1")) == 1);
+        assert_se(hashmap_put(m, strdup("key 2"), strdup("value 2")) == 1);
+        assert_se(hashmap_put(m, strdup("key 3"), strdup("value 3")) == 1);
+
+        hashmap_clear_free_free(m);
+        assert_se(hashmap_isempty(m));
+}
+
+DEFINE_PRIVATE_HASH_OPS_WITH_KEY_DESTRUCTOR(test_hash_ops_key, char, string_hash_func, string_compare_func, free);
+DEFINE_PRIVATE_HASH_OPS_FULL(test_hash_ops_full, char, string_hash_func, string_compare_func, free, char, free);
+
+static void test_hashmap_clear_free_with_destructor(void) {
+        _cleanup_hashmap_free_ Hashmap *m = NULL;
+
+        log_info("%s", __func__);
+
+        m = hashmap_new(&test_hash_ops_key);
+        assert_se(m);
+
+        assert_se(hashmap_put(m, strdup("key 1"), NULL) == 1);
+        assert_se(hashmap_put(m, strdup("key 2"), NULL) == 1);
+        assert_se(hashmap_put(m, strdup("key 3"), NULL) == 1);
+
+        hashmap_clear_free(m);
+        assert_se(hashmap_isempty(m));
+        m = hashmap_free(m);
+
+        m = hashmap_new(&test_hash_ops_full);
+        assert_se(m);
+
+        assert_se(hashmap_put(m, strdup("key 1"), strdup("value 1")) == 1);
+        assert_se(hashmap_put(m, strdup("key 2"), strdup("value 2")) == 1);
+        assert_se(hashmap_put(m, strdup("key 3"), strdup("value 3")) == 1);
+
+        hashmap_clear_free(m);
+        assert_se(hashmap_isempty(m));
 }
 
 static void test_hashmap_reserve(void) {
@@ -886,13 +922,8 @@ static void test_hashmap_reserve(void) {
 }
 
 void test_hashmap_funcs(void) {
-        int r;
-
         log_parse_environment();
         log_open();
-
-        r = getenv_bool("SYSTEMD_SLOW_TESTS");
-        arg_slow = r >= 0 ? r : SYSTEMD_SLOW_TESTS_DEFAULT;
 
         test_hashmap_copy();
         test_hashmap_get_strv();
@@ -921,5 +952,6 @@ void test_hashmap_funcs(void) {
         test_hashmap_steal_first_key();
         test_hashmap_steal_first();
         test_hashmap_clear_free_free();
+        test_hashmap_clear_free_with_destructor();
         test_hashmap_reserve();
 }

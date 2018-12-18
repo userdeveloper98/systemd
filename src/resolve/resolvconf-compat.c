@@ -9,13 +9,22 @@
 #include "extract-word.h"
 #include "fileio.h"
 #include "parse-util.h"
+#include "pretty-print.h"
 #include "resolvconf-compat.h"
 #include "resolvectl.h"
 #include "resolved-def.h"
 #include "string-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 
-static void resolvconf_help(void) {
+static int resolvconf_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("resolvectl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%1$s -a INTERFACE < FILE\n"
                "%1$s -d INTERFACE\n"
                "\n"
@@ -34,7 +43,12 @@ static void resolvconf_help(void) {
                "implementations are not supported and will cause the invocation to fail: -u,\n"
                "-I, -i, -l, -R, -r, -v, -V, --enable-updates, --disable-updates,\n"
                "--updates-are-enabled.\n"
-               , program_invocation_short_name);
+               "\nSee the %2$s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_nameserver(const char *string) {
@@ -126,8 +140,7 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 switch(c) {
 
                 case 'h':
-                        resolvconf_help();
-                        return 0; /* done */;
+                        return resolvconf_help();
 
                 case ARG_VERSION:
                         return version();
@@ -170,19 +183,19 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 case 'r':
                 case 'v':
                 case 'V':
-                        log_error("Switch -%c not supported.", c);
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Switch -%c not supported.", c);
 
                 /* The Debian resolvconf commands we don't support. */
                 case ARG_ENABLE_UPDATES:
-                        log_error("Switch --enable-updates not supported.");
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Switch --enable-updates not supported.");
                 case ARG_DISABLE_UPDATES:
-                        log_error("Switch --disable-updates not supported.");
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Switch --disable-updates not supported.");
                 case ARG_UPDATES_ARE_ENABLED:
-                        log_error("Switch --updates-are-enabled not supported.");
-                        return -EINVAL;
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Switch --updates-are-enabled not supported.");
 
                 case '?':
                         return -EINVAL;
@@ -191,17 +204,15 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_mode == _MODE_INVALID) {
-                log_error("Expected either -a or -d on the command line.");
-                return -EINVAL;
-        }
+        if (arg_mode == _MODE_INVALID)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Expected either -a or -d on the command line.");
 
-        if (optind+1 != argc) {
-                log_error("Expected interface name as argument.");
-                return -EINVAL;
-        }
+        if (optind+1 != argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Expected interface name as argument.");
 
-        r = ifname_mangle(argv[optind], false);
+        r = ifname_mangle(argv[optind]);
         if (r <= 0)
                 return r;
 
@@ -255,10 +266,9 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 } else if (type == TYPE_PRIVATE)
                         log_debug("Private DNS server data not supported, ignoring.");
 
-                if (!arg_set_dns) {
-                        log_error("No DNS servers specified, refusing operation.");
-                        return -EINVAL;
-                }
+                if (!arg_set_dns)
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "No DNS servers specified, refusing operation.");
         }
 
         return 1; /* work to do */

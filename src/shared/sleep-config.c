@@ -9,8 +9,12 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/utsname.h>
 #include <syslog.h>
 #include <unistd.h>
+
+#include "sd-id128.h"
 
 #include "alloc-util.h"
 #include "conf-parser.h"
@@ -21,12 +25,15 @@
 #include "log.h"
 #include "macro.h"
 #include "parse-util.h"
+#include "path-util.h"
 #include "sleep-config.h"
 #include "string-util.h"
 #include "strv.h"
 
-int parse_sleep_config(const char *verb, char ***_modes, char ***_states, usec_t *_delay) {
-
+int parse_sleep_config(const char *verb, bool *ret_allow, char ***ret_modes, char ***ret_states, usec_t *ret_delay) {
+        int allow_suspend = -1, allow_hibernate = -1,
+            allow_s2h = -1, allow_hybrid_sleep = -1;
+        bool allow;
         _cleanup_strv_free_ char
                 **suspend_mode = NULL, **suspend_state = NULL,
                 **hibernate_mode = NULL, **hibernate_state = NULL,
@@ -35,13 +42,19 @@ int parse_sleep_config(const char *verb, char ***_modes, char ***_states, usec_t
         usec_t delay = 180 * USEC_PER_MINUTE;
 
         const ConfigTableItem items[] = {
-                { "Sleep",   "SuspendMode",      config_parse_strv,  0, &suspend_mode  },
-                { "Sleep",   "SuspendState",     config_parse_strv,  0, &suspend_state },
-                { "Sleep",   "HibernateMode",    config_parse_strv,  0, &hibernate_mode  },
-                { "Sleep",   "HibernateState",   config_parse_strv,  0, &hibernate_state },
-                { "Sleep",   "HybridSleepMode",  config_parse_strv,  0, &hybrid_mode  },
-                { "Sleep",   "HybridSleepState", config_parse_strv,  0, &hybrid_state },
-                { "Sleep",   "HibernateDelaySec", config_parse_sec,  0, &delay},
+                { "Sleep", "AllowSuspend",              config_parse_tristate, 0, &allow_suspend },
+                { "Sleep", "AllowHibernation",          config_parse_tristate, 0, &allow_hibernate },
+                { "Sleep", "AllowSuspendThenHibernate", config_parse_tristate, 0, &allow_s2h },
+                { "Sleep", "AllowHybridSleep",          config_parse_tristate, 0, &allow_hybrid_sleep },
+
+                { "Sleep", "SuspendMode",               config_parse_strv, 0, &suspend_mode  },
+                { "Sleep", "SuspendState",              config_parse_strv, 0, &suspend_state },
+                { "Sleep", "HibernateMode",             config_parse_strv, 0, &hibernate_mode  },
+                { "Sleep", "HibernateState",            config_parse_strv, 0, &hibernate_state },
+                { "Sleep", "HybridSleepMode",           config_parse_strv, 0, &hybrid_mode  },
+                { "Sleep", "HybridSleepState",          config_parse_strv, 0, &hybrid_state },
+
+                { "Sleep", "HibernateDelaySec",         config_parse_sec,  0, &delay},
                 {}
         };
 
@@ -51,51 +64,63 @@ int parse_sleep_config(const char *verb, char ***_modes, char ***_states, usec_t
                                         CONFIG_PARSE_WARN, NULL);
 
         if (streq(verb, "suspend")) {
+                allow = allow_suspend != 0;
+
                 /* empty by default */
                 modes = TAKE_PTR(suspend_mode);
 
                 if (suspend_state)
                         states = TAKE_PTR(suspend_state);
                 else
-                        states = strv_new("mem", "standby", "freeze", NULL);
+                        states = strv_new("mem", "standby", "freeze");
 
         } else if (streq(verb, "hibernate")) {
+                allow = allow_hibernate != 0;
+
                 if (hibernate_mode)
                         modes = TAKE_PTR(hibernate_mode);
                 else
-                        modes = strv_new("platform", "shutdown", NULL);
+                        modes = strv_new("platform", "shutdown");
 
                 if (hibernate_state)
                         states = TAKE_PTR(hibernate_state);
                 else
-                        states = strv_new("disk", NULL);
+                        states = strv_new("disk");
 
         } else if (streq(verb, "hybrid-sleep")) {
+                allow = allow_hybrid_sleep > 0 ||
+                        (allow_suspend != 0 && allow_hibernate != 0);
+
                 if (hybrid_mode)
                         modes = TAKE_PTR(hybrid_mode);
                 else
-                        modes = strv_new("suspend", "platform", "shutdown", NULL);
+                        modes = strv_new("suspend", "platform", "shutdown");
 
                 if (hybrid_state)
                         states = TAKE_PTR(hybrid_state);
                 else
-                        states = strv_new("disk", NULL);
+                        states = strv_new("disk");
 
-        } else if (streq(verb, "suspend-then-hibernate"))
+        } else if (streq(verb, "suspend-then-hibernate")) {
+                allow = allow_s2h > 0 ||
+                        (allow_suspend != 0 && allow_hibernate != 0);
+
                 modes = states = NULL;
-        else
+        } else
                 assert_not_reached("what verb");
 
         if ((!modes && STR_IN_SET(verb, "hibernate", "hybrid-sleep")) ||
             (!states && !streq(verb, "suspend-then-hibernate")))
                 return log_oom();
 
-        if (_modes)
-                *_modes = TAKE_PTR(modes);
-        if (_states)
-                *_states = TAKE_PTR(states);
-        if (_delay)
-                *_delay = delay;
+        if (ret_allow)
+                *ret_allow = allow;
+        if (ret_modes)
+                *ret_modes = TAKE_PTR(modes);
+        if (ret_states)
+                *ret_states = TAKE_PTR(states);
+        if (ret_delay)
+                *ret_delay = delay;
 
         return 0;
 }
@@ -138,12 +163,16 @@ int can_sleep_disk(char **types) {
                 return true;
 
         /* If /sys is read-only we cannot sleep */
-        if (access("/sys/power/disk", W_OK) < 0)
+        if (access("/sys/power/disk", W_OK) < 0) {
+                log_debug_errno(errno, "/sys/power/disk is not writable: %m");
                 return false;
+        }
 
         r = read_one_line_file("/sys/power/disk", &p);
-        if (r < 0)
+        if (r < 0) {
+                log_debug_errno(r, "Couldn't read /sys/power/disk: %m");
                 return false;
+        }
 
         STRV_FOREACH(type, types) {
                 const char *word, *state;
@@ -193,18 +222,30 @@ int find_hibernate_location(char **device, char **type, size_t *size, size_t *us
                            "%zu "   /* used */
                            "%*i\n", /* priority */
                            &dev_field, &type_field, &size_field, &used_field);
+                if (k == EOF)
+                        break;
                 if (k != 4) {
-                        if (k == EOF)
-                                break;
-
                         log_warning("Failed to parse /proc/swaps:%u", i);
                         continue;
                 }
 
-                if (streq(type_field, "partition") && endswith(dev_field, "\\040(deleted)")) {
-                        log_warning("Ignoring deleted swapfile '%s'.", dev_field);
-                        continue;
+                if (streq(type_field, "file")) {
+
+                        if (endswith(dev_field, "\\040(deleted)")) {
+                                log_warning("Ignoring deleted swap file '%s'.", dev_field);
+                                continue;
+                        }
+
+                } else if (streq(type_field, "partition")) {
+                        const char *fn;
+
+                        fn = path_startswith(dev_field, "/dev/");
+                        if (fn && startswith(fn, "zram")) {
+                                log_debug("Ignoring compressed RAM swap device '%s'.", dev_field);
+                                continue;
+                        }
                 }
+
                 if (device)
                         *device = TAKE_PTR(dev_field);
                 if (type)
@@ -216,8 +257,8 @@ int find_hibernate_location(char **device, char **type, size_t *size, size_t *us
                 return 0;
         }
 
-        log_debug("No swap partitions were found.");
-        return -ENOSYS;
+        return log_debug_errno(SYNTHETIC_ERRNO(ENOSYS),
+                               "No swap partitions were found.");
 }
 
 static bool enough_swap_for_hibernation(void) {
@@ -235,22 +276,87 @@ static bool enough_swap_for_hibernation(void) {
 
         r = get_proc_field("/proc/meminfo", "Active(anon)", WHITESPACE, &active);
         if (r < 0) {
-                log_error_errno(r, "Failed to retrieve Active(anon) from /proc/meminfo: %m");
+                log_debug_errno(r, "Failed to retrieve Active(anon) from /proc/meminfo: %m");
                 return false;
         }
 
         r = safe_atollu(active, &act);
         if (r < 0) {
-                log_error_errno(r, "Failed to parse Active(anon) from /proc/meminfo: %s: %m",
-                                active);
+                log_debug_errno(r, "Failed to parse Active(anon) from /proc/meminfo: %s: %m", active);
                 return false;
         }
 
         r = act <= (size - used) * HIBERNATION_SWAP_THRESHOLD;
-        log_debug("Hibernation is %spossible, Active(anon)=%llu kB, size=%zu kB, used=%zu kB, threshold=%.2g%%",
-                  r ? "" : "im", act, size, used, 100*HIBERNATION_SWAP_THRESHOLD);
+        log_debug("%s swap for hibernation, Active(anon)=%llu kB, size=%zu kB, used=%zu kB, threshold=%.2g%%",
+                  r ? "Enough" : "Not enough", act, size, used, 100*HIBERNATION_SWAP_THRESHOLD);
 
         return r;
+}
+
+static int kernel_exists(void) {
+        struct utsname u;
+        sd_id128_t m;
+        int i, r;
+
+        /* Do some superficial checks whether the kernel we are currently running is still around. If it isn't we
+         * shouldn't offer hibernation as we couldn't possible resume from hibernation again. Of course, this check is
+         * very superficial, as the kernel's mere existance is hardly enough to know whether the hibernate/resume cycle
+         * will succeed. However, the common case of kernel updates can be caught this way, and it's definitely worth
+         * covering that. */
+
+        for (i = 0;; i++) {
+                _cleanup_free_ char *path = NULL;
+
+                switch (i) {
+
+                case 0:
+                        /* First, let's look in /lib/modules/`uname -r`/vmlinuz. This is where current Fedora places
+                         * its RPM-managed kernels. It's a good place, as it means compiled vendor code is monopolized
+                         * in /usr, and then the kernel image is stored along with its modules in the same
+                         * hierarchy. It's also what our 'kernel-install' script is written for. */
+                        if (uname(&u) < 0)
+                                return log_debug_errno(errno, "Failed to acquire kernel release: %m");
+
+                        path = strjoin("/lib/modules/", u.release, "/vmlinuz");
+                        break;
+
+                case 1:
+                        /* Secondly, let's look in /boot/vmlinuz-`uname -r`. This is where older Fedora and other
+                         * distributions tend to place the kernel. */
+                        path = strjoin("/boot/vmlinuz-", u.release);
+                        break;
+
+                case 2:
+                        /* For the other cases, we look in the EFI/boot partition, at the place where our
+                         * "kernel-install" script copies the kernel on install by default. */
+                        r = sd_id128_get_machine(&m);
+                        if (r < 0)
+                                return log_debug_errno(r, "Failed to read machine ID: %m");
+
+                        (void) asprintf(&path, "/efi/" SD_ID128_FORMAT_STR "/%s/linux", SD_ID128_FORMAT_VAL(m), u.release);
+                        break;
+                case 3:
+                        (void) asprintf(&path, "/boot/" SD_ID128_FORMAT_STR "/%s/linux", SD_ID128_FORMAT_VAL(m), u.release);
+                        break;
+                case 4:
+                        (void) asprintf(&path, "/boot/efi/" SD_ID128_FORMAT_STR "/%s/linux", SD_ID128_FORMAT_VAL(m), u.release);
+                        break;
+
+                default:
+                        return false;
+                }
+
+                if (!path)
+                        return -ENOMEM;
+
+                log_debug("Testing whether %s exists.", path);
+
+                if (access(path, F_OK) >= 0)
+                        return true;
+
+                if (errno != ENOENT)
+                        log_debug_errno(errno, "Failed to determine whether '%s' exists, ignoring: %m", path);
+        }
 }
 
 int read_fiemap(int fd, struct fiemap **ret) {
@@ -337,6 +443,8 @@ int read_fiemap(int fd, struct fiemap **ret) {
         return 0;
 }
 
+static int can_sleep_internal(const char *verb, bool check_allowed);
+
 static bool can_s2h(void) {
         const char *p;
         int r;
@@ -349,8 +457,8 @@ static bool can_s2h(void) {
         }
 
         FOREACH_STRING(p, "suspend", "hibernate") {
-                r = can_sleep(p);
-                if (IN_SET(r, 0, -ENOSPC)) {
+                r = can_sleep_internal(p, false);
+                if (IN_SET(r, 0, -ENOSPC, -ENOMEDIUM, -EADV)) {
                         log_debug("Unable to %s system.", p);
                         return false;
                 }
@@ -361,18 +469,24 @@ static bool can_s2h(void) {
         return true;
 }
 
-int can_sleep(const char *verb) {
+static int can_sleep_internal(const char *verb, bool check_allowed) {
+        bool allow;
         _cleanup_strv_free_ char **modes = NULL, **states = NULL;
         int r;
 
         assert(STR_IN_SET(verb, "suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate"));
 
-        if (streq(verb, "suspend-then-hibernate"))
-                return can_s2h();
-
-        r = parse_sleep_config(verb, &modes, &states, NULL);
+        r = parse_sleep_config(verb, &allow, &modes, &states, NULL);
         if (r < 0)
                 return false;
+
+        if (check_allowed && !allow) {
+                log_debug("Sleep mode \"%s\" is disabled by configuration.", verb);
+                return false;
+        }
+
+        if (streq(verb, "suspend-then-hibernate"))
+                return can_s2h();
 
         if (!can_sleep_state(states) || !can_sleep_disk(modes))
                 return false;
@@ -380,8 +494,17 @@ int can_sleep(const char *verb) {
         if (streq(verb, "suspend"))
                 return true;
 
+        if (kernel_exists() <= 0) {
+                log_debug_errno(errno, "Couldn't find kernel, not offering hibernation.");
+                return -ENOMEDIUM;
+        }
+
         if (!enough_swap_for_hibernation())
                 return -ENOSPC;
 
         return true;
+}
+
+int can_sleep(const char *verb) {
+        return can_sleep_internal(verb, true);
 }

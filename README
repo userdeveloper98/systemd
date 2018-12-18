@@ -148,13 +148,14 @@ REQUIREMENTS:
         libacl (optional)
         libselinux (optional)
         liblzma (optional)
-        liblz4 >= 119 (optional)
+        liblz4 >= 1.3.0 / 130 (optional)
         libgcrypt (optional)
         libqrencode (optional)
         libmicrohttpd (optional)
         libpython (optional)
         libidn2 or libidn (optional)
-        gnutls >= 3.1.4 (optional, >= 3.5.3 is necessary to support DNS-over-TLS)
+        gnutls >= 3.1.4 (optional, >= 3.5.3 is required to support DNS-over-TLS with gnutls)
+        openssl >= 1.1.0 (optional, required to support DNS-over-TLS with openssl)
         elfutils >= 158 (optional)
         polkit (optional)
         pkg-config
@@ -162,14 +163,14 @@ REQUIREMENTS:
         docbook-xsl (optional, required for documentation)
         xsltproc    (optional, required for documentation)
         python-lxml (optional, required to build the indices)
-        python >= 3.4, meson >= 0.44, ninja
+        python >= 3.5, meson >= 0.46, ninja
         gcc, awk, sed, grep, m4, and similar tools
 
         During runtime, you need the following additional
         dependencies:
 
         util-linux >= v2.27.1 required
-        dbus >= 1.4.0 (strictly speaking optional, but recommended)
+        dbus >= 1.9.14 (strictly speaking optional, but recommended)
                 NOTE: If using dbus < 1.9.18, you should override the default
                 policy directory (--with-dbuspolicydir=/etc/dbus-1/system.d).
         dracut (optional)

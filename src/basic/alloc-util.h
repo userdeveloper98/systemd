@@ -8,6 +8,8 @@
 
 #include "macro.h"
 
+typedef void (*free_func_t)(void *p);
+
 #define new(t, n) ((t*) malloc_multiply(sizeof(t), (n)))
 
 #define new0(t, n) ((t*) calloc((n), sizeof(t)))
@@ -45,6 +47,21 @@ static inline void *mfree(void *memory) {
 
 void* memdup(const void *p, size_t l) _alloc_(2);
 void* memdup_suffix0(const void *p, size_t l) _alloc_(2);
+
+#define memdupa(p, l)                           \
+        ({                                      \
+                void *_q_;                      \
+                _q_ = alloca(l);                \
+                memcpy(_q_, p, l);              \
+        })
+
+#define memdupa_suffix0(p, l)                   \
+        ({                                      \
+                void *_q_;                      \
+                _q_ = alloca(l + 1);            \
+                ((uint8_t*) _q_)[l] = 0;        \
+                memcpy(_q_, p, l);              \
+        })
 
 static inline void freep(void *p) {
         free(*(void**) p);

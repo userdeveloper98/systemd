@@ -10,6 +10,7 @@
 
 #include "exit-status.h"
 #include "log.h"
+#include "main-func.h"
 #include "mount-setup.h"
 #include "mount-util.h"
 #include "path-util.h"
@@ -22,44 +23,36 @@
  * options that are in /etc/fstab that systemd might not have
  * respected */
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         _cleanup_hashmap_free_free_ Hashmap *pids = NULL;
         _cleanup_endmntent_ FILE *f = NULL;
         struct mntent* me;
         int r;
 
-        if (argc > 1) {
-                log_error("This program takes no argument.");
-                return EXIT_FAILURE;
-        }
+        log_setup_service();
 
-        log_set_target(LOG_TARGET_AUTO);
-        log_parse_environment();
-        log_open();
+        if (argc > 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This program takes no arguments.");
 
         umask(0022);
 
         f = setmntent("/etc/fstab", "re");
         if (!f) {
-                if (errno == ENOENT) {
-                        r = 0;
-                        goto finish;
-                }
+                if (errno == ENOENT)
+                        return 0;
 
-                r = log_error_errno(errno, "Failed to open /etc/fstab: %m");
-                goto finish;
+                return log_error_errno(errno, "Failed to open /etc/fstab: %m");
         }
 
         pids = hashmap_new(NULL);
-        if (!pids) {
-                r = log_oom();
-                goto finish;
-        }
+        if (!pids)
+                return log_oom();
 
         while ((me = getmntent(f))) {
+                _cleanup_free_ char *s = NULL;
                 pid_t pid;
                 int k;
-                char *s;
 
                 /* Remount the root fs, /usr and all API VFS */
                 if (!mount_point_is_api(me->mnt_dir) &&
@@ -69,9 +62,9 @@ int main(int argc, char *argv[]) {
 
                 log_debug("Remounting %s", me->mnt_dir);
 
-                r = safe_fork("(remount)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+                r = safe_fork("(remount)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
                 if (r < 0)
-                        goto finish;
+                        return r;
                 if (r == 0) {
                         /* Child */
 
@@ -84,48 +77,40 @@ int main(int argc, char *argv[]) {
                 /* Parent */
 
                 s = strdup(me->mnt_dir);
-                if (!s) {
-                        r = log_oom();
-                        goto finish;
-                }
+                if (!s)
+                        return log_oom();
 
                 k = hashmap_put(pids, PID_TO_PTR(pid), s);
-                if (k < 0) {
-                        free(s);
-                        r = log_oom();
-                        goto finish;
-                }
+                if (k < 0)
+                        return log_oom();
+                TAKE_PTR(s);
         }
 
         r = 0;
         while (!hashmap_isempty(pids)) {
                 siginfo_t si = {};
-                char *s;
+                _cleanup_free_ char *s = NULL;
 
                 if (waitid(P_ALL, 0, &si, WEXITED) < 0) {
-
                         if (errno == EINTR)
                                 continue;
 
-                        r = log_error_errno(errno, "waitid() failed: %m");
-                        goto finish;
+                        return log_error_errno(errno, "waitid() failed: %m");
                 }
 
                 s = hashmap_remove(pids, PID_TO_PTR(si.si_pid));
-                if (s) {
-                        if (!is_clean_exit(si.si_code, si.si_status, EXIT_CLEAN_COMMAND, NULL)) {
-                                if (si.si_code == CLD_EXITED)
-                                        log_error(MOUNT_PATH " for %s exited with exit status %i.", s, si.si_status);
-                                else
-                                        log_error(MOUNT_PATH " for %s terminated by signal %s.", s, signal_to_string(si.si_status));
+                if (s &&
+                    !is_clean_exit(si.si_code, si.si_status, EXIT_CLEAN_COMMAND, NULL)) {
+                        if (si.si_code == CLD_EXITED)
+                                log_error(MOUNT_PATH " for %s exited with exit status %i.", s, si.si_status);
+                        else
+                                log_error(MOUNT_PATH " for %s terminated by signal %s.", s, signal_to_string(si.si_status));
 
-                                r = -ENOEXEC;
-                        }
-
-                        free(s);
+                        r = -ENOEXEC;
                 }
         }
 
-finish:
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return r;
 }
+
+DEFINE_MAIN_FUNCTION(run);

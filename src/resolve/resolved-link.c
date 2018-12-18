@@ -6,6 +6,7 @@
 #include "sd-network.h"
 
 #include "alloc-util.h"
+#include "env-file.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "missing.h"
@@ -16,6 +17,7 @@
 #include "resolved-mdns.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 
 int link_new(Manager *m, Link **ret, int ifindex) {
         _cleanup_(link_freep) Link *l = NULL;
@@ -1257,14 +1259,13 @@ int link_load_user(Link *l) {
         if (l->is_managed)
                 return 0; /* if the device is managed, then networkd is our configuration source, not the bus API */
 
-        r = parse_env_file(NULL, l->state_file, NEWLINE,
+        r = parse_env_file(NULL, l->state_file,
                            "LLMNR", &llmnr,
                            "MDNS", &mdns,
                            "DNSSEC", &dnssec,
                            "SERVERS", &servers,
                            "DOMAINS", &domains,
-                           "NTAS", &ntas,
-                           NULL);
+                           "NTAS", &ntas);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
